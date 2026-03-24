@@ -1,10 +1,21 @@
 import { Component, computed, effect, inject, OnDestroy, signal } from '@angular/core';
+import { FormsModule } from '@angular/forms';
 import { JsonPipe } from '@angular/common';
-import { CognitoAuthService } from 'ngx-cognito-auth';
+import { HttpClient, HttpContext, HttpHeaders } from '@angular/common/http';
+import { firstValueFrom } from 'rxjs';
+import { CognitoAuthService, SKIP_COGNITO_BEARER } from 'ngx-cognito-auth';
+
+interface ApiResult {
+  status: number;
+  headers: Record<string, string>;
+  body: string;
+  isJson: boolean;
+  durationMs: number;
+}
 
 @Component({
   standalone: true,
-  imports: [JsonPipe],
+  imports: [JsonPipe, FormsModule],
   styles: [`
     h1 { margin-top: 0; color: var(--color-primary); }
 
@@ -136,6 +147,115 @@ import { CognitoAuthService } from 'ngx-cognito-auth';
         border: 1px solid color-mix(in srgb, #ef4444 40%, transparent);
       }
     }
+
+    .api-tester {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+
+      .api-url-row {
+        display: flex;
+        gap: 0.5rem;
+        align-items: stretch;
+
+        select {
+          padding: 0.45rem 0.6rem;
+          border: 1px solid var(--color-border);
+          border-radius: var(--radius);
+          background: var(--color-bg);
+          color: var(--color-text);
+          font-size: 0.85rem;
+          font-weight: 600;
+          cursor: pointer;
+        }
+
+        input[type="url"], input[type="text"] {
+          flex: 1;
+          padding: 0.45rem 0.75rem;
+          border: 1px solid var(--color-border);
+          border-radius: var(--radius);
+          background: var(--color-bg);
+          color: var(--color-text);
+          font-size: 0.85rem;
+          font-family: monospace;
+
+          &:focus { outline: 2px solid var(--color-primary); outline-offset: -1px; }
+        }
+      }
+
+      .api-options {
+        display: flex;
+        align-items: center;
+        gap: 1.5rem;
+        font-size: 0.875rem;
+        flex-wrap: wrap;
+
+        label {
+          display: flex;
+          align-items: center;
+          gap: 0.4rem;
+          cursor: pointer;
+          user-select: none;
+        }
+      }
+
+      textarea {
+        width: 100%;
+        min-height: 80px;
+        padding: 0.5rem 0.75rem;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius);
+        background: var(--color-bg);
+        color: var(--color-text);
+        font-size: 0.8rem;
+        font-family: monospace;
+        resize: vertical;
+        box-sizing: border-box;
+
+        &:focus { outline: 2px solid var(--color-primary); outline-offset: -1px; }
+      }
+    }
+
+    .api-response {
+      margin-top: 0.25rem;
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius);
+      overflow: hidden;
+
+      .api-response-meta {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        padding: 0.5rem 1rem;
+        background: var(--color-bg);
+        border-bottom: 1px solid var(--color-border);
+        font-size: 0.8rem;
+
+        .status-badge {
+          font-weight: 700;
+          font-size: 0.85rem;
+          padding: 0.1rem 0.5rem;
+          border-radius: 4px;
+
+          &.ok   { background: color-mix(in srgb, var(--color-success) 20%, transparent); color: var(--color-success); }
+          &.warn { background: color-mix(in srgb, #f59e0b 20%, transparent); color: #d97706; }
+          &.err  { background: color-mix(in srgb, #ef4444 20%, transparent); color: #ef4444; }
+        }
+
+        .duration { color: var(--color-text-muted); }
+      }
+
+      pre.api-response-body {
+        margin: 0;
+        padding: 1rem;
+        font-size: 0.75rem;
+        background: #1e1e2e;
+        color: #cdd6f4;
+        overflow-x: auto;
+        max-height: 400px;
+        overflow-y: auto;
+      }
+    }
   `],
   template: `
     <h1>Dashboard</h1>
@@ -184,6 +304,55 @@ import { CognitoAuthService } from 'ngx-cognito-auth';
             <span class="refresh-status success">✓ Token erfolgreich verlängert</span>
           } @else if (refreshStatus() === 'error') {
             <span class="refresh-status error">✗ Fehler: {{ refreshError() }}</span>
+          }
+        </div>
+      </div>
+    </div>
+
+    <!-- Debug: API Request Tester -->
+    <div class="card">
+      <div class="card-header">🌐 Debug: API Request</div>
+      <div class="card-body">
+        <div class="api-tester">
+          <div class="api-url-row">
+            <select [(ngModel)]="apiMethod">
+              <option value="GET">GET</option>
+              <option value="POST">POST</option>
+            </select>
+            <input type="text" [(ngModel)]="apiUrl" placeholder="https://api.example.com/endpoint" />
+            <button (click)="sendRequest()" [disabled]="apiLoading() || !apiUrl.trim()">
+              {{ apiLoading() ? 'Lädt…' : 'Senden' }}
+            </button>
+          </div>
+
+          <div class="api-options">
+            <label>
+              <input type="checkbox" [(ngModel)]="apiUseBearer" />
+              Authorization: Bearer Token senden
+            </label>
+          </div>
+
+          @if (apiMethod === 'POST') {
+            <textarea [(ngModel)]="apiBody" placeholder='Request Body (JSON), z.B. {"key": "value"}'></textarea>
+          }
+
+          @if (apiResult()) {
+            <div class="api-response">
+              <div class="api-response-meta">
+                <span class="status-badge" [class]="apiStatusClass()">
+                  {{ apiResult()!.status }}
+                </span>
+                <span class="duration">{{ apiResult()!.durationMs }} ms</span>
+                @if (apiResult()!.headers['content-type']) {
+                  <span class="duration">{{ apiResult()!.headers['content-type'] }}</span>
+                }
+              </div>
+              <pre class="api-response-body">{{ apiResult()!.body }}</pre>
+            </div>
+          }
+
+          @if (apiError()) {
+            <div class="refresh-status error">✗ {{ apiError() }}</div>
           }
         </div>
       </div>
@@ -280,6 +449,90 @@ export class DashboardComponent implements OnDestroy {
     if (exp === null) return '';
     return new Date(exp).toLocaleString('de-DE');
   });
+
+  // --- API Tester ---
+  private readonly http = inject(HttpClient);
+
+  protected apiMethod: 'GET' | 'POST' = 'GET';
+  protected apiUrl = '';
+  protected apiBody = '';
+  protected apiUseBearer = true;
+
+  protected readonly apiLoading = signal(false);
+  protected readonly apiResult = signal<ApiResult | null>(null);
+  protected readonly apiError = signal<string>('');
+
+  protected readonly apiStatusClass = computed(() => {
+    const s = this.apiResult()?.status ?? 0;
+    if (s >= 200 && s < 300) return 'ok';
+    if (s >= 300 && s < 500) return 'warn';
+    return 'err';
+  });
+
+  async sendRequest(): Promise<void> {
+    const url = this.apiUrl.trim();
+    if (!url) return;
+
+    this.apiLoading.set(true);
+    this.apiResult.set(null);
+    this.apiError.set('');
+
+    const context = this.apiUseBearer
+      ? new HttpContext()
+      : new HttpContext().set(SKIP_COGNITO_BEARER, true);
+
+    const options = {
+      observe: 'response' as const,
+      responseType: 'text' as const,
+      context,
+      headers: this.apiMethod === 'POST'
+        ? new HttpHeaders({ 'Content-Type': 'application/json' })
+        : new HttpHeaders(),
+    };
+
+    const t0 = performance.now();
+    try {
+      const req = this.apiMethod === 'POST'
+        ? this.http.post(url, this.apiBody || null, options)
+        : this.http.get(url, options);
+      const res = await firstValueFrom(req);
+
+      const raw = res.body ?? '';
+      let body = raw;
+      let isJson = false;
+      try { body = JSON.stringify(JSON.parse(raw), null, 2); isJson = true; } catch { /* raw */ }
+
+      const headers: Record<string, string> = {};
+      res.headers.keys().forEach(k => { headers[k] = res.headers.get(k) ?? ''; });
+
+      this.apiResult.set({
+        status: res.status,
+
+        headers,
+        body,
+        isJson,
+        durationMs: Math.round(performance.now() - t0),
+      });
+    } catch (err: unknown) {
+      const httpErr = err as { status?: number; error?: string; message?: string };
+      if (httpErr?.status) {
+        let body = httpErr.error ?? '';
+        try { body = JSON.stringify(JSON.parse(body), null, 2); } catch { /* raw */ }
+        this.apiResult.set({
+          status: httpErr.status,
+  
+          headers: {},
+          body,
+          isJson: false,
+          durationMs: Math.round(performance.now() - t0),
+        });
+      } else {
+        this.apiError.set(httpErr?.message ?? String(err));
+      }
+    } finally {
+      this.apiLoading.set(false);
+    }
+  }
 
   // --- Token refresh debug ---
   protected readonly refreshing = signal(false);
