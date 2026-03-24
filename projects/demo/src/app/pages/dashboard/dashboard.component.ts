@@ -1,4 +1,4 @@
-import { Component, inject } from '@angular/core';
+import { Component, computed, effect, inject, OnDestroy, signal } from '@angular/core';
 import { JsonPipe } from '@angular/common';
 import { CognitoAuthService } from 'ngx-cognito-auth';
 
@@ -87,12 +87,78 @@ import { CognitoAuthService } from 'ngx-cognito-auth';
 
       .value { word-break: break-all; }
     }
+
+    .expiry-row {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+
+    .countdown {
+      font-size: 1.6rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: 0.02em;
+
+      &.warning { color: #f59e0b; }
+      &.danger  { color: #ef4444; }
+      &.ok      { color: var(--color-success); }
+      &.expired { color: #ef4444; font-size: 1rem; }
+    }
+
+    .expiry-abs {
+      font-size: 0.8rem;
+      color: var(--color-text-muted);
+    }
+
+    .refresh-row {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+
+    .refresh-status {
+      font-size: 0.85rem;
+      padding: 0.3rem 0.75rem;
+      border-radius: var(--radius);
+
+      &.success {
+        background: color-mix(in srgb, var(--color-success) 15%, transparent);
+        color: var(--color-success);
+        border: 1px solid color-mix(in srgb, var(--color-success) 40%, transparent);
+      }
+
+      &.error {
+        background: color-mix(in srgb, #ef4444 15%, transparent);
+        color: #ef4444;
+        border: 1px solid color-mix(in srgb, #ef4444 40%, transparent);
+      }
+    }
   `],
   template: `
     <h1>Dashboard</h1>
 
     <div class="welcome">
       <p>Willkommen, <strong>{{ auth.user()?.name ?? auth.user()?.email ?? 'Nutzer' }}</strong>!</p>
+    </div>
+
+    <!-- Token Expiry Timer -->
+    <div class="card">
+      <div class="card-header">⏱ Token-Ablauf</div>
+      <div class="card-body">
+        <div class="expiry-row">
+          @if (tokenExpired()) {
+            <span class="countdown expired">Token abgelaufen</span>
+          } @else if (countdownText()) {
+            <span class="countdown" [class]="countdownClass()">{{ countdownText() }}</span>
+            <span class="expiry-abs">Ablauf: {{ expiryDateText() }}</span>
+          } @else {
+            <span class="expiry-abs">Kein Token vorhanden</span>
+          }
+        </div>
+      </div>
     </div>
 
     <!-- Bearer Token -->
@@ -103,6 +169,23 @@ import { CognitoAuthService } from 'ngx-cognito-auth';
         <button class="copy-btn" (click)="copyToken()">
           {{ copied ? '✓ Kopiert' : 'In Zwischenablage kopieren' }}
         </button>
+      </div>
+    </div>
+
+    <!-- Debug: Token Refresh -->
+    <div class="card">
+      <div class="card-header">🛠 Debug: Token Refresh</div>
+      <div class="card-body">
+        <div class="refresh-row">
+          <button (click)="triggerRefresh()" [disabled]="refreshing()">
+            {{ refreshing() ? 'Wird verlängert…' : 'Token jetzt verlängern' }}
+          </button>
+          @if (refreshStatus() === 'success') {
+            <span class="refresh-status success">✓ Token erfolgreich verlängert</span>
+          } @else if (refreshStatus() === 'error') {
+            <span class="refresh-status error">✗ Fehler: {{ refreshError() }}</span>
+          }
+        </div>
       </div>
     </div>
 
@@ -148,9 +231,91 @@ import { CognitoAuthService } from 'ngx-cognito-auth';
     </div>
   `,
 })
-export class DashboardComponent {
+export class DashboardComponent implements OnDestroy {
   protected readonly auth = inject(CognitoAuthService);
   protected copied = false;
+
+  // --- Token expiry timer ---
+  private readonly _now = signal(Date.now());
+  private readonly _intervalId: ReturnType<typeof setInterval>;
+
+  private readonly tokenExp = computed<number | null>(() => {
+    const token = this.auth.accessToken();
+    if (!token) return null;
+    try {
+      const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      return typeof payload['exp'] === 'number' ? payload['exp'] * 1000 : null;
+    } catch {
+      return null;
+    }
+  });
+
+  protected readonly tokenExpired = computed(() => {
+    const exp = this.tokenExp();
+    return exp !== null && this._now() >= exp;
+  });
+
+  protected readonly countdownText = computed<string | null>(() => {
+    const exp = this.tokenExp();
+    if (exp === null) return null;
+    const diff = Math.max(0, exp - this._now());
+    const h = Math.floor(diff / 3_600_000);
+    const m = Math.floor((diff % 3_600_000) / 60_000);
+    const s = Math.floor((diff % 60_000) / 1_000);
+    if (h > 0) return `${h}h ${String(m).padStart(2, '0')}m ${String(s).padStart(2, '0')}s`;
+    return `${String(m).padStart(2, '0')}m ${String(s).padStart(2, '0')}s`;
+  });
+
+  protected readonly countdownClass = computed<string>(() => {
+    const exp = this.tokenExp();
+    if (exp === null) return '';
+    const diff = exp - this._now();
+    if (diff < 60_000) return 'danger';
+    if (diff < 300_000) return 'warning';
+    return 'ok';
+  });
+
+  protected readonly expiryDateText = computed<string>(() => {
+    const exp = this.tokenExp();
+    if (exp === null) return '';
+    return new Date(exp).toLocaleString('de-DE');
+  });
+
+  // --- Token refresh debug ---
+  protected readonly refreshing = signal(false);
+  protected readonly refreshStatus = signal<'idle' | 'success' | 'error'>('idle');
+  protected readonly refreshError = signal<string>('');
+
+  constructor() {
+    this._intervalId = setInterval(() => this._now.set(Date.now()), 1000);
+
+    // Reset refresh status when token changes (after successful refresh)
+    effect(() => {
+      this.auth.accessToken(); // track
+      if (this.refreshStatus() === 'success') {
+        setTimeout(() => this.refreshStatus.set('idle'), 4000);
+      }
+    });
+  }
+
+  ngOnDestroy(): void {
+    clearInterval(this._intervalId);
+  }
+
+  async triggerRefresh(): Promise<void> {
+    this.refreshing.set(true);
+    this.refreshStatus.set('idle');
+    this.refreshError.set('');
+    try {
+      await this.auth.refreshTokens();
+      this.refreshStatus.set('success');
+    } catch (err) {
+      this.refreshError.set(err instanceof Error ? err.message : String(err));
+      this.refreshStatus.set('error');
+    } finally {
+      this.refreshing.set(false);
+    }
+  }
 
   copyToken(): void {
     const token = this.auth.getToken();
