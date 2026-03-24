@@ -13,7 +13,11 @@
 /yarn.lock
 
 # Environment files
+# .env holds real secrets and must never be committed.
 /.env
+# environment.ts is auto-generated from .env by scripts/set-env.js — never commit it.
+# Use .env.example as the reference template instead.
+projects/demo/src/app/environments/environment.ts
 
 # Angular CLI and build artefacts
 /.angular-cli.json
@@ -26,3 +30,6 @@
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Environment files
+.environment.ts
