@@ -28,14 +28,23 @@ export const cognitoCallbackResolver: ResolveFn<void> = async (
   const authService = inject(CognitoAuthService);
 
   const code = route.queryParamMap.get('code');
-  const state = route.queryParamMap.get('state') ?? '';
+  const state = route.queryParamMap.get('state');
 
   if (!code) {
     throw new Error(
       '[ngx-cognito-auth] Callback route is missing the "code" query parameter. ' +
-        'Ensure the /callback path matches the redirectUri configured in your Cognito App Client.'
+      'Ensure the /callback path matches the redirectUri configured in your Cognito App Client.'
     );
   }
+
+  if (!state) {
+    throw new Error(
+      '[ngx-cognito-auth] Callback route is missing the "state" query parameter. ' +
+      'This may indicate a broken OAuth flow or a misconfigured Cognito App Client.'
+    );
+  }
+
+  console.debug('[ngx-cognito-auth] Handling OAuth callback with code and state:', { code, state });
 
   await authService.handleCallback(code, state);
 };
