@@ -102,8 +102,23 @@ interface ApiResult {
     .expiry-row {
       display: flex;
       align-items: center;
+      justify-content: space-between;
       gap: 1rem;
       flex-wrap: wrap;
+    }
+
+    .refresh-row {
+      margin-top: 1rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+
+    .expiry-left {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
     }
 
     .countdown {
@@ -123,10 +138,10 @@ interface ApiResult {
       color: var(--color-text-muted);
     }
 
-    .refresh-row {
+    .expiry-right {
       display: flex;
       align-items: center;
-      gap: 1rem;
+      gap: 0.75rem;
       flex-wrap: wrap;
     }
 
@@ -261,21 +276,60 @@ interface ApiResult {
     <h1>Dashboard</h1>
 
     <div class="welcome">
-      <p>Willkommen, <strong>{{ auth.user()?.name ?? auth.user()?.email ?? 'Nutzer' }}</strong>!</p>
+      <p>Welcome, <strong>{{ auth.user()?.name ?? auth.user()?.email ?? 'User' }}</strong>!</p>
+    </div>
+
+    <!-- User Info -->
+    <div class="card">
+      <div class="card-header">👤 User Info (ID Token Claims)</div>
+      <div class="card-body">
+        <div class="meta-grid">
+          <span class="label">Sub</span>
+          <span class="value">{{ auth.user()?.sub }}</span>
+
+          <span class="label">Email</span>
+          <span class="value">{{ auth.user()?.email }}</span>
+
+          @if (auth.user()?.name) {
+            <span class="label">Name</span>
+            <span class="value">{{ auth.user()?.name }}</span>
+          }
+
+          @if (auth.user()?.given_name) {
+            <span class="label">First Name</span>
+            <span class="value">{{ auth.user()?.given_name }}</span>
+          }
+
+          @if (auth.user()?.family_name) {
+            <span class="label">Last Name</span>
+            <span class="value">{{ auth.user()?.family_name }}</span>
+          }
+        </div>
+      </div>
     </div>
 
     <!-- Token Expiry Timer -->
     <div class="card">
-      <div class="card-header">⏱ Token-Ablauf</div>
+      <div class="card-header">⏱ Token Expiry</div>
       <div class="card-body">
         <div class="expiry-row">
           @if (tokenExpired()) {
-            <span class="countdown expired">Token abgelaufen</span>
+            <span class="countdown expired">Token expired</span>
           } @else if (countdownText()) {
             <span class="countdown" [class]="countdownClass()">{{ countdownText() }}</span>
-            <span class="expiry-abs">Ablauf: {{ expiryDateText() }}</span>
+            <span class="expiry-abs">Expires: {{ expiryDateText() }}</span>
           } @else {
-            <span class="expiry-abs">Kein Token vorhanden</span>
+            <span class="expiry-abs">No token present</span>
+          }
+        </div>
+        <div class="refresh-row">
+          <button (click)="triggerRefresh()" [disabled]="refreshing()">
+            {{ refreshing() ? 'Refreshing…' : 'Refresh token now' }}
+          </button>
+          @if (refreshStatus() === 'success') {
+            <span class="refresh-status success">✓ Token refreshed successfully</span>
+          } @else if (refreshStatus() === 'error') {
+            <span class="refresh-status error">✗ Error: {{ refreshError() }}</span>
           }
         </div>
       </div>
@@ -287,27 +341,11 @@ interface ApiResult {
       <div class="card-body">
         <pre class="token-display">{{ auth.accessToken() }}</pre>
         <button class="copy-btn" (click)="copyToken()">
-          {{ copied ? '✓ Kopiert' : 'In Zwischenablage kopieren' }}
+          {{ copied ? '✓ Copied' : 'Copy to clipboard' }}
         </button>
       </div>
     </div>
 
-    <!-- Debug: Token Refresh -->
-    <div class="card">
-      <div class="card-header">🛠 Debug: Token Refresh</div>
-      <div class="card-body">
-        <div class="refresh-row">
-          <button (click)="triggerRefresh()" [disabled]="refreshing()">
-            {{ refreshing() ? 'Wird verlängert…' : 'Token jetzt verlängern' }}
-          </button>
-          @if (refreshStatus() === 'success') {
-            <span class="refresh-status success">✓ Token erfolgreich verlängert</span>
-          } @else if (refreshStatus() === 'error') {
-            <span class="refresh-status error">✗ Fehler: {{ refreshError() }}</span>
-          }
-        </div>
-      </div>
-    </div>
 
     <!-- Debug: API Request Tester -->
     <div class="card">
@@ -321,19 +359,19 @@ interface ApiResult {
             </select>
             <input type="text" [(ngModel)]="apiUrl" placeholder="https://api.example.com/endpoint" />
             <button (click)="sendRequest()" [disabled]="apiLoading() || !apiUrl.trim()">
-              {{ apiLoading() ? 'Lädt…' : 'Senden' }}
+              {{ apiLoading() ? 'Loading…' : 'Send' }}
             </button>
           </div>
 
           <div class="api-options">
             <label>
               <input type="checkbox" [(ngModel)]="apiUseBearer" />
-              Authorization: Bearer Token senden
+              Send Authorization: Bearer Token
             </label>
           </div>
 
           @if (apiMethod === 'POST') {
-            <textarea [(ngModel)]="apiBody" placeholder='Request Body (JSON), z.B. {"key": "value"}'></textarea>
+            <textarea [(ngModel)]="apiBody" placeholder='Request Body (JSON), e.g. {"key": "value"}'></textarea>
           }
 
           @if (apiResult()) {
@@ -358,38 +396,9 @@ interface ApiResult {
       </div>
     </div>
 
-    <!-- User Info -->
-    <div class="card">
-      <div class="card-header">👤 Nutzerdaten (ID Token Claims)</div>
-      <div class="card-body">
-        <div class="meta-grid">
-          <span class="label">Sub</span>
-          <span class="value">{{ auth.user()?.sub }}</span>
-
-          <span class="label">E-Mail</span>
-          <span class="value">{{ auth.user()?.email }}</span>
-
-          @if (auth.user()?.name) {
-            <span class="label">Name</span>
-            <span class="value">{{ auth.user()?.name }}</span>
-          }
-
-          @if (auth.user()?.given_name) {
-            <span class="label">Vorname</span>
-            <span class="value">{{ auth.user()?.given_name }}</span>
-          }
-
-          @if (auth.user()?.family_name) {
-            <span class="label">Nachname</span>
-            <span class="value">{{ auth.user()?.family_name }}</span>
-          }
-        </div>
-      </div>
-    </div>
-
     <!-- Raw Claims -->
     <div class="card">
-      <div class="card-header">🧾 Alle Claims (raw JSON)</div>
+      <div class="card-header">🧾 All Claims (raw JSON)</div>
       <div class="card-body">
         <pre>{{ auth.user() | json }}</pre>
       </div>
@@ -447,7 +456,7 @@ export class DashboardComponent implements OnDestroy {
   protected readonly expiryDateText = computed<string>(() => {
     const exp = this.tokenExp();
     if (exp === null) return '';
-    return new Date(exp).toLocaleString('de-DE');
+    return new Date(exp).toLocaleString('en-US');
   });
 
   // --- API Tester ---
@@ -520,7 +529,7 @@ export class DashboardComponent implements OnDestroy {
         try { body = JSON.stringify(JSON.parse(body), null, 2); } catch { /* raw */ }
         this.apiResult.set({
           status: httpErr.status,
-  
+
           headers: {},
           body,
           isJson: false,
