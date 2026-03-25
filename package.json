@@ -14,7 +14,9 @@
     "test": "ng test",
     "test:lib": "ng test ngx-cognito-auth",
     "test:demo": "ng test demo",
-    "lint": "ng lint"
+    "lint": "ng lint",
+    "lib:package": "npm pack dist/ngx-cognito-auth",
+    "lib:publish": "npm publish dist/ngx-cognito-auth --access public"
   },
   "dependencies": {
     "@angular/animations": "^21.0.0",
