@@ -44,8 +44,6 @@ export const cognitoCallbackResolver: ResolveFn<void> = async (
     );
   }
 
-  console.debug('[ngx-cognito-auth] Handling OAuth callback with code and state:', { code, state });
-
   await authService.handleCallback(code, state);
 };
 

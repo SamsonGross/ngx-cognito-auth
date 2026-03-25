@@ -80,9 +80,11 @@ function buildAuthorizeUrl(
 }
 
 function buildLogoutUrl(config: CognitoAuthConfig): string {
+  const base = new URL(config.redirectUri);
+  const logoutUri = `${base.protocol}//${base.host}${config.postLogoutRoute ?? '/'}`;
   const params = new URLSearchParams({
     client_id: config.clientId,
-    logout_uri: config.redirectUri.replace('/callback', config.postLogoutRoute ?? '/'),
+    logout_uri: logoutUri,
   });
   return `https://${config.domain}/logout?${params.toString()}`;
 }
@@ -102,6 +104,9 @@ export class CognitoAuthService {
   private readonly _idToken = signal<string | null>(null);
   private readonly _refreshToken = signal<string | null>(null);
 
+  /** In-flight refresh promise shared across all concurrent callers. */
+  private _refreshPromise: Promise<void> | null = null;
+
   /** Read-only signal for the raw access token (Bearer token). */
   readonly accessToken: Signal<string | null> = this._accessToken.asReadonly();
 
@@ -111,8 +116,15 @@ export class CognitoAuthService {
     return token ? decodeJwtPayload<CognitoUser>(token) : null;
   });
 
-  /** True when a valid access token is present. */
-  readonly isAuthenticated = computed(() => this._accessToken() !== null);
+  /**
+   * True when the user has an active session.
+   * Returns true if an access token is present, or if a refresh token is
+   * available (the interceptor will refresh transparently on the next request).
+   * Returns false only when both tokens are absent.
+   */
+  readonly isAuthenticated = computed(
+    () => this._accessToken() !== null || this._refreshToken() !== null
+  );
 
   constructor() {
     this.prefix = this.config.storageKeyPrefix ?? 'cog_auth';
@@ -121,8 +133,28 @@ export class CognitoAuthService {
   /**
    * Called on app initialization: reads persisted tokens from storage,
    * validates expiry, and refreshes silently if needed.
+   *
+   * Races against a 5-second timeout so a slow or unreachable Cognito
+   * endpoint never blocks Angular's bootstrap indefinitely. On timeout
+   * the local session is cleared and the guard redirects to login.
    */
   async initialize(): Promise<void> {
+    try {
+      await Promise.race([
+        this._runInitialize(),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error('[ngx-cognito-auth] Session restore timed out after 5 s.')),
+            5_000
+          )
+        ),
+      ]);
+    } catch {
+      this.clearStorage();
+    }
+  }
+
+  private async _runInitialize(): Promise<void> {
     const access = sessionStorage.getItem(this.storageKey('access_token'));
     const id = sessionStorage.getItem(this.storageKey('id_token'));
     const refresh = localStorage.getItem(this.storageKey('refresh_token'));
@@ -143,11 +175,7 @@ export class CognitoAuthService {
 
     if (refresh) {
       this._refreshToken.set(refresh);
-      try {
-        await this.refreshTokens();
-      } catch {
-        this.clearStorage();
-      }
+      await this.refreshTokens();
     }
   }
 
@@ -195,11 +223,15 @@ export class CognitoAuthService {
       );
     }
 
-    const tokens = await this.exchangeCodeForTokens(code, verifier);
-    this.storeTokens(tokens);
-
-    sessionStorage.removeItem(this.storageKey('pkce_verifier'));
-    sessionStorage.removeItem(this.storageKey('pkce_state'));
+    // Always remove PKCE state — even if the token exchange fails — so that
+    // a subsequent login attempt starts with a clean slate.
+    try {
+      const tokens = await this.exchangeCodeForTokens(code, verifier);
+      this.storeTokens(tokens);
+    } finally {
+      sessionStorage.removeItem(this.storageKey('pkce_verifier'));
+      sessionStorage.removeItem(this.storageKey('pkce_state'));
+    }
 
     const returnUrl = sessionStorage.getItem(this.storageKey('return_url'));
     sessionStorage.removeItem(this.storageKey('return_url'));
@@ -232,9 +264,21 @@ export class CognitoAuthService {
 
   /**
    * Silently refreshes the access and ID tokens using the stored refresh token.
+   * Concurrent calls are deduplicated — all callers share the same in-flight
+   * request and receive the result once it resolves.
    * Throws if no refresh token is available.
    */
-  async refreshTokens(): Promise<void> {
+  refreshTokens(): Promise<void> {
+    if (this._refreshPromise) return this._refreshPromise;
+
+    this._refreshPromise = this._executeRefresh().finally(() => {
+      this._refreshPromise = null;
+    });
+
+    return this._refreshPromise;
+  }
+
+  private async _executeRefresh(): Promise<void> {
     const refresh = this._refreshToken();
     if (!refresh) {
       throw new Error('[ngx-cognito-auth] No refresh token available for silent refresh.');
@@ -262,6 +306,12 @@ export class CognitoAuthService {
     this._idToken.set(tokens.id_token);
     sessionStorage.setItem(this.storageKey('access_token'), tokens.access_token);
     sessionStorage.setItem(this.storageKey('id_token'), tokens.id_token);
+
+    // Cognito may rotate the refresh token on each use — persist the new one if returned.
+    if (tokens.refresh_token) {
+      this._refreshToken.set(tokens.refresh_token);
+      localStorage.setItem(this.storageKey('refresh_token'), tokens.refresh_token);
+    }
   }
 
   // ---------------------------------------------------------------------------
